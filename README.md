@@ -15,14 +15,20 @@
  I use this tool to crack a password that I have mistyped so that I can recover the encrypted data.
 
  Main idea is to crack the password with minimum CPU power, so I do not attempt a brute-force search, but instead do
-   a breadth-first search with minimal Damerau–Levenshtein edits, starting from the password I suspect was used but
-   mistyped.
-
+   a breadth-first search starting with the correct password that I believe was mistyped, and make one, two, then three, etc.
+   "edits" to immitate common typing mistakes, and try all possible combinations of those mistakes at every possible position
+   in the "correct" password.  The "mistakes" attempted are Damerau–Levenshtein edits, meaning:
+   
+    * drop a character,
+    * add a character,
+    * substitute a character, or
+    * twiddle two characters.
+   
  The vast majority of mistyped passwords are only off by one character or position!  In my case, I had
    forgotten two characters when I had typed my password, and it took about 5 minutes to "crack" the password
-   starting with a password that was off by two.  Note that the more edits are required to get back to the correct
-   password, the runtime will increase exponentially.  For two edits and password about 10 characters long, it 
-   took my macbook pro about 5 minutes to crack the password.  Mileage will vary.
+   starting with a password that was off by two.  Note that the runtime will increase exponentially as the
+   number of edits increases that are required to get back to the correct password.  For two edits and password
+   about 10 characters long, it took my macbook pro about 5 minutes to crack the password.  Mileage will vary.
 
 ## ALGORITHM
  I try every combination deleting characters, substituting characters, twiddling characters, and adding
@@ -66,5 +72,8 @@ time.
 
 ### Restart
  I should be able to stop the program and continue near where I left off in case I need to restart
-   the computer, etc., before the target password is found.  When the program is halted
-   prematurely, it should write current progress to stderr or elsewhere that it can be used.
+   the computer, it crashes, or etc.  When the program is halted prematurely, it should write current progress
+   to stderr or elsewhere.
+   
+### Parallelism
+I could add multi-threading or cluster-computing to allow running the algorithm faster.
