@@ -1,9 +1,11 @@
 CC = gcc
-CFLAGS = -std=c++17 -pedantic -Wall -g
+CFLAGS = -std=c++17 -pedantic -Wall -Wno-vla-extension -g
 OBJECTS = cracker.o
 LIBS = -lstdc++
 
-all: cracker README.md
+# This is currently too noisy; deactivating for now
+#all: cracker README.md
+all: cracker
 
 %.o: %.cc
 	$(CC) $(CFLAGS) -c $<

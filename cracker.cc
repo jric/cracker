@@ -39,7 +39,7 @@
    export SEED_PWD=XXXXX
    ./cracker --checker "command to check password"
              --match "string to match that lets us know the password worked"
-            [--distance <unsigned>] default all, check passwords with this number of mutations only
+            [--distance <unsigned>] default all, check passwords with this number of mutations or more
             [--dryrun] default false; don't check password, just print passwords that would be checked
 ```
 
@@ -92,11 +92,24 @@ time.
 #define ERR(stuff) { OUTPUT(stuff, "ERROR") }
 #define WARN(stuff) { OUTPUT(stuff, "WARN") }
 #define INFO(stuff) { OUTPUT(stuff, "INFO") }
-#define DBG1(stuff) { if (DEBUG >= 1) OUTPUT(stuff, "DEBUG1") }
+#if DEBUG > 0
+#define DBG1(stuff) OUTPUT(stuff, "DEBUG1")
+#else
+#define DBG1(stuff) { } // noop
+#endif
+#if DEBUG > 1
+#define DBG2(stuff) OUTPUT(stuff, "DEBUG2")
+#else
+#define DBG2(stuff) { } // noop
+#endif
 #define ABORT(stuff) { ERR("FATAL: " << stuff) perror("system error"); exit(1); }
 #define ASSERT_NOT(x, y) { if (x == y) ABORT(x) }
 #define ASSERT_IS(x, y) { if (x != y) ABORT(x << " != " << y) }
-#define USAGE(msg) { if (msg) ERR(msg) ERR("usage: cracker --checker <cmd> --match <str_to_match>") \
+#define USAGE(msg) { if (msg) ERR(msg) ERR(\
+    "usage: cracker --checker 'command to check password'\n"\
+    "         --match 'string to match that lets us know the password worked'\n"\
+    "         [--distance <unsigned>] default all, check passwords with this number of mutations or more\n"\
+    "         [--dryrun] default false; don't check password, just print passwords that would be checked") \
   exit(msg ? 2 : 0); }
 
 enum PIPE_FILE_DESCRIPTERS
@@ -275,53 +288,81 @@ inline void searchIterateDels(char *pwdMutated, unsigned dels) {
     }
 }
 
-// Iterates all the different ways to add a char into the pwd string and then iterates deletions
-// Assumes adds <= strlen(pwdMutated) + 1 (can add before and after string)
+// if arr contains ptrs in original pwd for each pos being mutated, return ptr to pos where the added char is (string
+//   shifts as chars are added)
+#define MUTATED_POS(arr, pos) ( arr[pos] + pos )
+// Use 1 for normal operation, 20 for faster debugging; must always be < 127
+#define CHAR_STEPS 1
+
+// helper for debugging searchIterateAdds()
+inline void showPositionsBeingIterated(char ** addsArr, unsigned addsArrLen, char * stringStart) {
+    std::stringstream s;
+    s << addsArr[0] - stringStart;
+    for (int i = 1; i < addsArrLen; i++) s << ", " << addsArr[i] - stringStart;
+    DBG1("iterating chars at positions: " << s.str())
+}
+
+// helper for searchIterateAdds() : tries every combination of characters at the given insertion points
+inline void searchIterateAtInsertions(int adds, int dels, char *pwdMutated, char **insertionPoints) {
+    int iterPos; // which of the points are we iterating currently? 0...adds-1
+    while (true) {
+        iterPos = adds - 1;
+        searchIterateDels(pwdMutated, dels);
+        if ('~' < static_cast<unsigned char>(*MUTATED_POS(insertionPoints, iterPos) += CHAR_STEPS)) { // too big, iterate next left
+            DBG2("too big, moving left");
+            while (--iterPos >= 0 && '~' < static_cast<unsigned char>(*MUTATED_POS(insertionPoints, iterPos) += CHAR_STEPS));
+            for (int resetPos = iterPos + 1; resetPos < adds; resetPos++)
+                *MUTATED_POS(insertionPoints, resetPos) = ' ';
+        }
+        DBG2("iterPos: " << iterPos);
+        if (iterPos < 0) break;
+    }
+}
+
+// Iterates all the different ways to add "adds" num of chars into the pwd string and then iterates deletions
 // @throw FoundPwd if the password is found
 inline void searchIterateAdds(char *pwdMutated, int adds, int dels) {
-    char *addsArr[MAX_PWD_LEN]; // where to add a char
+    char *addsArr[adds]; // where to add a char; each entry points into pwdMutated
+    const int pwdMutatedLen = strlen(pwdMutated);
 
     if (!adds)
         return searchIterateDels(pwdMutated, dels);
 
-    // initial values in addsArr
-    for (int addsNum = 0; addsNum < adds; addsNum++)
-        addsArr[addsNum] = pwdMutated + addsNum;
+    if (adds + pwdMutatedLen >= MAX_PWD_LEN)
+        return; // we cannot add the given number of characters -- exceeds max pwd length; skip this op
 
-    // movePos is most significant (leftward) place currently being modified as we wind through all combos,
-    //  highest pointer first
-    for (int movePos = adds - 1; movePos >= 0; ) {
-        // make space for new chars and initialize
-        for (int addPos = 0; addPos < adds; addPos++) {
+    // initial values in addsArr; all insertion points start at the end of pwdMutated
+    for (int addsNum = 0; addsNum < adds; addsNum++)
+        addsArr[addsNum] = pwdMutated + pwdMutatedLen;
+
+    // try each insertion point combo; our stop condition is when our leftmost insertion point would be beyond start of string
+    for ( ; addsArr[0] >= pwdMutated; ) {
+        // make space for new chars in pwdMutated and initialize
+        for (int addPos = adds - 1; addPos >= 0; addPos--)
             memmove(addsArr[addPos] + 1, addsArr[addPos], strlen(addsArr[addPos]) + 1);
-            *addsArr[addPos] = ' ';
-        }
-#if 0
-        std::stringstream s;
-        s << addsArr[0] - pwdMutated;
-        for (int i = 1; i < adds; i++) s << ", " << addsArr[i] - pwdMutated;
-        DBG1("iterating chars at positions: " << s.str())
+        for (int addPos = adds - 1; addPos >= 0; addPos--)
+            *MUTATED_POS(addsArr, addPos) = ' ';
+#if 0   // DEBUGING OUTPUT
+        showPositionsBeingIterated(addsArr, adds, pwdMutated);
 #endif
         // iterate all combinations of chars
-        for (int iterPos = adds - 1; iterPos >= 0; ) {
-            iterPos = adds - 1;
-            searchIterateDels(pwdMutated, dels);
-            if ('~' < ++*addsArr[iterPos]) {
-                while (--iterPos >= 0 && '~' < ++*addsArr[iterPos]);
-                for (int resetPos = iterPos + 1; resetPos < adds; resetPos++)
-                    *addsArr[resetPos] = ' ';
-            }
-        }
+        searchIterateAtInsertions(adds, dels, pwdMutated, addsArr);
         // restore the string
         for (int addPos = adds - 1; addPos >= 0; addPos--)
-            memmove(addsArr[addPos], addsArr[addPos] + 1, strlen(addsArr[addPos] + 1) + 1);
-        // iterate position for new char insertion
-        movePos = adds - 1;
-        if (!*(++addsArr[movePos] - 1)) { // two spots past the end of the string (one too far)
-            while (--movePos >= 0 && ++addsArr[movePos] + 1 >= addsArr[movePos + 1]);
-            for (int resetPos = movePos + 1; resetPos < adds; resetPos++)
-                addsArr[resetPos] = resetPos ? addsArr[resetPos] + 1 : pwdMutated;
+            memmove(MUTATED_POS(addsArr, addPos), MUTATED_POS(addsArr, addPos) + 1, strlen(MUTATED_POS(addsArr, addPos) + 1) + 1);
+        // iterate position(s) for new char insertion
+        // movePos is most significant (leftward) index point that was moved
+        int movePos = adds - 1;
+        while (true) {
+            --addsArr[movePos];
+            if (movePos == 0) break;
+            if (addsArr[movePos] < addsArr[movePos  - 1]) --movePos;
+            else break;
         }
+        DBG2("movePos: " << movePos);
+        if (movePos < adds - 1) // reset all rightward insertion points to end of string
+            for (int resetPos = movePos + 1; resetPos < adds; resetPos++)
+                addsArr[resetPos] = pwdMutated + pwdMutatedLen;
     }
 }
 
@@ -476,6 +517,8 @@ int main(int argc, const char **argv) {
 
     if (nullptr == seedPwd) ABORT("environment variable not set: " << SEED_PWD_VAR_NAME);
     seedPwdLen = strlen(seedPwd);
+
+    if (CHAR_STEPS > 1) WARN("char steps is " << CHAR_STEPS << "; not all passwords will be checked");
 
     std::string pwd = search(distance < 0 ? 0 : distance);
     std::cout << "Password is: \'" << pwd << '\'' << std::endl;
