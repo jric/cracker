@@ -34,25 +34,7 @@
 
 ## USAGE
 
- Usage:
- ```
-   export SEED_PWD=XXXXX
-   ./cracker --checker "command to check password"
-             --match "string to match that lets us know the password worked"
-            [--distance <unsigned>] default all, check passwords with this number of mutations or more
-            [--dryrun] default false; don't check password, just print passwords that would be checked
-```
-
- If "command to check password" contains an argument "PWD", that argument is varied with each password
-    attempt.  My sample command is:
-   `/usr/local/bin/gpg --batch --passphrase PWD --decrypt /my/file/name`
-
-The full command would be:
-
-```
-   SEED_PWD=XXXXX ./cracker --checker '/usr/local/bin/gpg --batch --passphrase PWD --decrypt /my/file/name' \
-      --match string-I-know-is-in-my-encrypted-file
-```
+See `README.md`
 
 ## FUTURE
 
@@ -82,6 +64,8 @@ time.
 #include <sstream>
 #include <exception>
 #include <sstream>
+#include <dlfcn.h>
+#include "cracker-plugin.h"
 
 #define DEBUG 1
 #define MAX_PWD_LEN 100 // we will check passwords up to this length
@@ -102,15 +86,21 @@ time.
 #else
 #define DBG2(stuff) { } // noop
 #endif
-#define ABORT(stuff) { ERR("FATAL: " << stuff) perror("system error"); exit(1); }
+#define ABORT(stuff) { ERR("FATAL: " << stuff); exit(2); }
 #define ASSERT_NOT(x, y) { if (x == y) ABORT(x) }
 #define ASSERT_IS(x, y) { if (x != y) ABORT(x << " != " << y) }
 #define USAGE(msg) { if (msg) ERR(msg) ERR(\
-    "usage: cracker --checker 'command to check password'\n"\
-    "         --match 'string to match that lets us know the password worked'\n"\
-    "         [--distance <unsigned>] default all, check passwords with this number of mutations or more\n"\
-    "         [--dryrun] default false; don't check password, just print passwords that would be checked") \
-  exit(msg ? 2 : 0); }
+   "usage: /cracker --checker \"command to check password\""\
+   "         --match \"string to match that lets us know the password worked\""\
+   "         [--distance <unsigned>] default all, check passwords with this number of mutations only"\
+   "         [--dryrun] default false; don't check password, just print passwords that would be checked"\
+   "./cracker --checker \"argument(s) to plugin, e.g. filepath\""\
+   "         --plugin <filename> instead of running a command with --match, use an in-memory"\
+   "             function call to make things faster; --checker becomes argument(s) to the plugin"\
+   "             see ## PLUGIN below"\
+   "         [--distance <unsigned>] default all, check passwords with this number of mutations only"\
+   "         [--dryrun] default false; don't check password, just print passwords that would be checked") \
+  exit(msg ? 3 : 0); }
 
 enum PIPE_FILE_DESCRIPTERS
 {
@@ -138,15 +128,21 @@ struct FoundPwd : public std::exception {
 // The command to run to try the password
 static std::string checkCmdOriginal; // as passed on the commandline
 static char **checkCmd = nullptr;
-static char **pwdField = nullptr; // will set to one of the entries in checkCmd if it is PWD
+static char **pwdField = nullptr; // will set to one of the entries in checkCmd if it is PWD or new ptr for plugin mode
 // Output from checkCmd that indicates success
 static std::string match;
+static std::string plugin;
+static void *pluginState = nullptr;
 // Edit distance to try
 static int distance = -1; // -1 means try more and more edits
 static bool dryrun = false;
 
 static const char *seedPwd = getenv(SEED_PWD_VAR_NAME); // the password we expected to work; typo from this one
 static unsigned seedPwdLen; // length of the seedPwd - compute once for efficiency
+
+crackerPluginInitFunc crackerPluginInit = nullptr;
+crackerPluginDecryptFunc crackerPluginDecrypt = nullptr;
+crackerPluginFinalizeFunc crackerPluginFinalize = nullptr;
 
 // splits a string by delimeter
 std::vector<std::string> split (const std::string &s, char delim) {
@@ -244,6 +240,21 @@ inline std::string execAndCapture() {
     return data;
 }
 
+// Returns true iff the current password unlocks the file
+inline bool testMatch() {
+    if (checkCmd) {
+        DBG1("checking on command line")
+        if (execAndCapture().find(match) != std::string::npos) return true;
+    } else {
+        DBG1("checking with plugin")
+        if (crackerPluginDecrypt(*pwdField, pluginState)) {
+            DBG1("plugin returned true for " << *pwdField);
+            return true;
+        }
+    }
+    return false;
+}
+
 // Iterates all the different ways to delete a char from the pwd string
 // Assumption, dels <= strlen(pwdMutated)
 // @throw FoundPwd if the password is found
@@ -252,7 +263,7 @@ inline void searchIterateDels(char *pwdMutated, unsigned dels) {
     char savedArr[MAX_PWD_LEN]; // chars we deleted
 
     if (!dels) {
-        if (execAndCapture().find(match) != std::string::npos)
+        if (testMatch())
                 throw FoundPwd(pwdMutated);
         return;
     }
@@ -269,7 +280,7 @@ inline void searchIterateDels(char *pwdMutated, unsigned dels) {
             memmove(delsArr[delPos], delsArr[delPos] + 1, strlen(delsArr[delPos] + 1) + 1);
         }
         //DBG1("saved str: " << std::string(savedArr, dels))
-        if (execAndCapture().find(match) != std::string::npos)
+        if (testMatch())
             throw FoundPwd(pwdMutated);
         // put all the characters back
         for (int delPos = 0; delPos < dels; delPos++) {
@@ -389,8 +400,7 @@ inline void searchIterateTrans(char * pwdMutated, int trans, int adds, int dels)
 
 }
 
-// Runs the search, generating variations of the seed password, trying them with checkCmd, and checking
-//   for a match
+// Runs the search, generating variations of the seed password, trying them with or plugin.
 // Starts by checking the seed password, then tries checking all variations at edit distance of 1, then 2, 
 //   etc. until the program runs out of life or finds the matching password.
 // Limitation:  I try char swap first, then transposition, then additions, then deletions.  If the  
@@ -408,7 +418,7 @@ std::string search(unsigned editDistance) {
     *pwdField = pwdMutated; // updates checkCmd
     if (editDistance == 0 && distance <= 0) {
         memcpy(pwdMutated, seedPwd, seedPwdLen + 1);
-        if (execAndCapture().find(match) != std::string::npos) return std::string(pwdMutated);
+        if (testMatch()) return std::string(pwdMutated);
     }
     // These first four for loops select all the combinations of various numbers of mutation for each type possible
     try {
@@ -490,19 +500,14 @@ int main(int argc, const char **argv) {
         if (!strcmp("--checker", argv[i])) {
             if (i + 1 >= argc) ABORT("missing argument for --checker");
             checkCmdOriginal = argv[++i];
-            std::vector<std::string> commandAndArgs = split(checkCmdOriginal, ' ');
-            checkCmd = static_cast<char **>(malloc(sizeof(char *) * commandAndArgs.size() + 1));
-            int i = 0;
-            for ( ; i < commandAndArgs.size(); i++) {
-                checkCmd[i] = strdup(commandAndArgs[i].c_str());
-                if (!strcmp(checkCmd[i], "PWD"))
-                    pwdField = checkCmd + i; // this it the command arg that will dynamically change
-            }
-            checkCmd[i] = nullptr;
-
         } else if (!strcmp("--match", argv[i])) {
             if (i + 1 >= argc) ABORT("missing argument for --match");
+            if (!plugin.empty()) ABORT("Can't specify both --match and --plugin");
             match = argv[++i];
+        } else if (!strcmp("--plugin", argv[i])) {
+            if (i + 1 >= argc) ABORT("missing argument for --plugin");
+            if (!match.empty()) ABORT("Can't specify both --match and --plugin");
+            plugin = argv[++i];
         } else if (!strcmp("--dryrun", argv[i])) {
             dryrun = true;
         } else if (!strcmp("--distance", argv[i])) {
@@ -512,8 +517,41 @@ int main(int argc, const char **argv) {
             USAGE("Unexpected argument");
         }
     }
-    if (checkCmd == nullptr) USAGE("required argument --checker missing")
-    if (match.empty()) USAGE("required argument --match missing or empty")
+    if (match.empty() && plugin.empty()) USAGE("Must specify one of --match or --plugin")
+
+    if (!match.empty()) { // doing a commandline check
+        DBG1("checking passwords via the commandline")
+        std::vector<std::string> commandAndArgs = split(checkCmdOriginal, ' ');
+        checkCmd = static_cast<char **>(malloc(sizeof(char *) * commandAndArgs.size() + 1));
+        int i = 0;
+        for ( ; i < commandAndArgs.size(); i++) {
+            checkCmd[i] = strdup(commandAndArgs[i].c_str());
+            if (!strcmp(checkCmd[i], "PWD"))
+                pwdField = checkCmd + i; // this it the command arg that will dynamically change
+        }
+        checkCmd[i] = nullptr;
+        if (checkCmd == nullptr) USAGE("required argument --checker missing")
+    } else { // doing a plugin check
+        DBG1("checking passwords via plugin " << plugin)
+        // Load the plugin
+        void *handle = dlopen(plugin.c_str(), RTLD_LAZY);
+        if (!handle) ABORT("Unable to load plugin " << plugin << " due to " << dlerror());
+        // Load the functions
+        crackerPluginInit = reinterpret_cast<crackerPluginInitFunc>(dlsym(handle, INIT_FUNC_NAME));
+        if (!crackerPluginInit)
+            ABORT("Unable to load " << INIT_FUNC_NAME << " from " << checkCmdOriginal << "; check available symbols");
+        crackerPluginDecrypt = reinterpret_cast<crackerPluginDecryptFunc>(dlsym(handle, DECRYPT_FUNC_NAME));
+        if (!crackerPluginDecrypt)
+            ABORT("Unable to load " << DECRYPT_FUNC_NAME << " from " << checkCmdOriginal << "; check available symbols");
+        crackerPluginFinalize = reinterpret_cast<crackerPluginFinalizeFunc>(dlsym(handle, FINALIZE_FUNC_NAME));
+        if (!crackerPluginFinalize)
+            ABORT("Unable to load " << FINALIZE_FUNC_NAME << " from " << checkCmdOriginal << "; check available symbols");
+
+        pluginState = crackerPluginInit(checkCmdOriginal.c_str());
+
+        char *currPwd;       // a place to keep track of the curr passwd being checked
+        pwdField = &currPwd;
+    }
 
     if (nullptr == seedPwd) ABORT("environment variable not set: " << SEED_PWD_VAR_NAME);
     seedPwdLen = strlen(seedPwd);
@@ -523,5 +561,7 @@ int main(int argc, const char **argv) {
     std::string pwd = search(distance < 0 ? 0 : distance);
     std::cout << "Password is: \'" << pwd << '\'' << std::endl;
 
-    return 0;
+    if (pluginState) crackerPluginFinalize(pluginState);
+
+    return pwd == std::string("NOT_FOUND") ? 1 : 0;
 }

@@ -44,8 +44,14 @@
    export SEED_PWD=XXXXX
    ./cracker --checker "command to check password"
              --match "string to match that lets us know the password worked"
-            [--distance <unsigned>] default all, check passwords with this number of mutations only
-            [--dryrun] default false; don't check password, just print passwords that would be checked
+             [--distance <unsigned>] default all, check passwords with this number of mutations only
+             [--dryrun] default false; don't check password, just print passwords that would be checked
+   ./cracker --checker "argument(s) to plugin, e.g. filepath"
+             --plugin <filename> instead of running a command with --match, use an in-memory
+                function call to make things faster; --checker args become arguments to the plugin
+                see ## PLUGIN below
+             [--distance <unsigned>] default all, check passwords with this number of mutations only
+             [--dryrun] default false; don't check password, just print passwords that would be checked
 ```
 
  If "command to check password" contains an argument "PWD", that argument is varied with each password
@@ -57,6 +63,24 @@ The full command would be:
    SEED_PWD=XXXXX ./cracker --checker '/usr/local/bin/gpg --batch --passphrase PWD --decrypt /my/file/name' \
       --match string-I-know-is-in-my-encrypted-file
 ```
+
+## PLUGIN
+
+We can load a dynamic library and use it to check the passwords.  The dynamic library must implement the
+interface in `cracker-plugin.h`.  Sample full command would be:
+```
+   SEED_PWD=XXX cracker --checker '/my/file/name' --plugin './libcrackerplugin_gpg.so.1.0.0'
+```
+
+## LIMITATIONS
+
+File name and path of file to decrypt cannot contain spaces.  If they do, rename the file first.
+
+## RETURNS
+
+0 if pwd is found
+1 if pwd is not found
+other on error
 
 ## FUTURE
 
