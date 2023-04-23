@@ -71,6 +71,7 @@ time.
 #define MAX_PWD_LEN 100 // we will check passwords up to this length
 #define BUFFER_SIZE 100 // size of buffer for inter-process-communication
 #define SEED_PWD_VAR_NAME "SEED_PWD"
+#define RETURN_CODE_PLUGIN_INIT 4 // code to exit with if plugin fails to initialize
 
 #define OUTPUT(stuff, level) { std::cerr << __FILE__ << ':' << __LINE__ << ": " << level << ": " << stuff << std::endl;  }
 #define ERR(stuff) { OUTPUT(stuff, "ERROR") }
@@ -548,6 +549,10 @@ int main(int argc, const char **argv) {
             ABORT("Unable to load " << FINALIZE_FUNC_NAME << " from " << checkCmdOriginal << "; check available symbols");
 
         pluginState = crackerPluginInit(checkCmdOriginal.c_str());
+        if (!pluginState) {
+            ABORT("Unable to initialize plugin");
+            return RETURN_CODE_PLUGIN_INIT;
+        }
 
         char *currPwd;       // a place to keep track of the curr passwd being checked
         pwdField = &currPwd;
